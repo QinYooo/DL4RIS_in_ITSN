@@ -187,7 +187,7 @@ class BaselineZFSDROptimizer:
             'final_P_sum': self.P_sum,
             'all_sinr': self.all_sinr
         }
-
+        print(f"P_bs: {self.P_bs}, P_sat: {self.P_sat}, P_sum: {self.P_sum}")
         return self.w, self.Phi, info
 
         
@@ -1067,7 +1067,7 @@ class BaselineZFSDROptimizer:
             signal = self.P_b * np.abs(H_eff_k[k].conj() @ w[:, k]) ** 2
             SINR_dB = 10 * np.log10(signal / interference + self.sigma2)
             all_sinr.append(signal / interference + self.sigma2)
-            print(f"  BS UE({k+1}) SINR: {SINR_dB:.2f} dB")
+            # print(f"  BS UE({k+1}) SINR: {SINR_dB:.2f} dB")
 
         # Satellite users
         for j in range(self.J):

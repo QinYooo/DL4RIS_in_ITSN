@@ -2,6 +2,9 @@ import numpy as np
 import torch
 import os
 import sys
+import argparse
+import multiprocessing
+import concurrent.futures
 from tqdm import tqdm
 
 # 添加项目根目录到 Python 路径
@@ -12,26 +15,30 @@ if project_root not in sys.path:
 from Scenario.scenario import ITSNScenario
 from Scenario.baseline_optimizer import BaselineZFSDROptimizer
 
-# === 参数配置 ===
-NUM_SAMPLES = 5000       # 生成样本总数
-# 注意：这里不再设置 SCALE_FACTOR，直接保存原始物理值
-SAVE_DIR = "dataset_ris_itsn_raw" # 修改目录名以示区别
-NOISE_POWER_DBM = -174 + 10*np.log10(10e6) # -104 dBm
-NOISE_POWER = 10**(NOISE_POWER_DBM/10) / 1000 # Watts
+# === 默认配置 ===
+DEFAULT_NUM_SAMPLES = 5000
+DEFAULT_BATCH_SIZE = 50       # 每个子进程一次处理多少样本
+SAVE_DIR = "dataset_ris_itsn_raw"
+NOISE_POWER_DBM = -174 + 10*np.log10(10e6)
+NOISE_POWER = 10**(NOISE_POWER_DBM/10) / 1000
 
 def ensure_dir(directory):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-def generate_dataset():
-    ensure_dir(SAVE_DIR)
+def generate_batch(args):
+    """
+    子进程执行函数：生成一批数据
+    """
+    batch_idx, batch_size, base_seed = args
     
-    # 1. 初始化场景
+    # 为当前 Batch 设置唯一的随机种子
+    seed = base_seed + batch_idx + np.random.randint(0, 10000)
+    
+    # 1. 初始化场景 (每个进程独立)
     env = ITSNScenario()
     
     # 2. 初始化优化器 (Teacher)
-    # 这里的参数保持不变，优化器内部会处理数值稳定性（如果求解器够强）
-    # 或者优化器内部也是基于物理值计算的
     optimizer = BaselineZFSDROptimizer(
         K=env.K,
         J=env.SK,
@@ -43,49 +50,39 @@ def generate_dataset():
         gamma_k=np.ones((env.K, 1)) * env.db2pow(13), # UE SINR 阈值 13dB
         gamma_j=env.db2pow(13),                       # SU SINR 阈值 13dB
         ris_amplitude_gain=env.ris_amplitude_gain,
-        N_iter=5,    # BCD 迭代次数
+        N_iter=5,     # BCD 迭代次数
         verbose=False # 关闭详细日志
     )
-
-    data_list = []
     
-    print(f"开始生成 {NUM_SAMPLES} 条数据...")
-    print(f"注意：所有数据均为原始物理数值 (无缩放)")
-
-    success_count = 0
+    local_data = []
     
-    for i in tqdm(range(NUM_SAMPLES)):
+    # 在 Batch 内循环生成
+    for _ in range(batch_size):
         try:
             # --- A. 随机化环境 ---
             env.reset_user_positions() 
             
-            # [修改点 1] 卫星方位角限制在 -180 ~ 45 度
-            ele = np.random.uniform(40, 80) # 仰角保持不变
+            # 卫星角度限制: 仰角 40~80, 方位角 -180~45
+            ele = np.random.uniform(40, 80)
             azi = np.random.uniform(-180, 45) 
             env.update_satellite_position(ele, azi)
             
             # --- B. 生成原始信道 ---
-            # 这里的信道是物理值 (极小)
             raw_channels = env.generate_channels()
             
             # --- C. 计算卫星等效单天线信道 ---
-            # W_sat 是卫星对准 SU 的波束 (N_sat, 1)
             W_sat_beam = raw_channels['W_sat'] 
             
-            # 将 (K, N_sat) 压缩为 (K, 1)
             h_s_k_eff = raw_channels['H_SAT2UE'] @ W_sat_beam 
             h_s_j_eff = raw_channels['H_SAT2SUE'] @ W_sat_beam 
-            # 将 (N_ris, N_sat) 压缩为 (N_ris, 1)
             G_S_eff = raw_channels['G_SAT'] @ W_sat_beam 
             
-            # 获取其他信道
-            h_k = raw_channels['H_BS2UE']    # (K, Nt)
-            h_j = raw_channels['H_BS2SUE']   # (SK, Nt)
-            h_k_r = raw_channels['H_RIS2UE'] # (K, N_ris)
-            h_j_r = raw_channels['H_RIS2SUE']# (SK, N_ris)
-            G_BS = raw_channels['G_BS']      # (N_ris, Nt)
+            h_k = raw_channels['H_BS2UE']
+            h_j = raw_channels['H_BS2SUE']
+            h_k_r = raw_channels['H_RIS2UE']
+            h_j_r = raw_channels['H_RIS2SUE']
+            G_BS = raw_channels['G_BS']
             
-            # 构造一个虚假的 W_sat (1x1) 给优化器
             W_sat_dummy = np.ones((1, env.SK), dtype=complex)
 
             # --- D. 运行凸优化 (获取 Label) ---
@@ -97,34 +94,20 @@ def generate_dataset():
                 W_sat_dummy
             )
             
-            # 提取优化结果
-            # 1. RIS 相位 (Teacher Theta)
-            theta_opt = np.angle(np.diag(Phi_opt)) # (N_ris,)
-            
-            # 2. 基站波束赋形 W (融合了功率 P_bs)
-            W_opt = optimizer.w # (Nt, K) - 原始物理值
-            
-            # 3. 卫星功率
-            P_sat_opt = info['final_P_sat'] # Watts - 原始物理值
+            # 提取结果
+            theta_opt = np.angle(np.diag(Phi_opt))
+            W_opt = optimizer.w
+            P_sat_opt = info['final_P_sat']
 
             # --- E. 数据封装 (无缩放) ---
-            
-            # 堆叠 UE 和 SU 的信道 (适配 AQEnetwork 输入格式)
-            # hk (K+SK, Nt)
             hk_stack = np.vstack([h_k, h_j]) 
-            # hrk (K+SK, N_ris)
             hrk_stack = np.vstack([h_k_r, h_j_r])
-            # hs (K+SK, 1)
             hs_stack = np.vstack([h_s_k_eff, h_s_j_eff])
             
-            # [修改点 2] 移除所有 scale 操作，保存原始数据
             sample_dict = {
-                # --- Labels (Teacher) ---
                 'theta_opt': theta_opt.astype(np.float32),      # (N_ris,)
                 'W_opt': W_opt.astype(np.complex64),            # (Nt, K)
                 'P_sat': np.float32(P_sat_opt),                 # Scalar
-                
-                # --- Inputs (Features) ---
                 'hk': hk_stack.astype(np.complex64),            # (K+SK, Nt)
                 'hrk': hrk_stack.astype(np.complex64),          # (K+SK, N_ris)
                 'GB': G_BS.astype(np.complex64),                # (N_ris, Nt)
@@ -132,18 +115,64 @@ def generate_dataset():
                 'GSAT': G_S_eff.astype(np.complex64),           # (N_ris, 1)
             }
             
-            data_list.append(sample_dict)
-            success_count += 1
+            local_data.append(sample_dict)
 
-        except Exception as e:
+        except Exception:
             # 忽略优化失败的样本
             continue
+            
+    return local_data
 
-    # 4. 保存为 PyTorch 格式
-    save_path = os.path.join(SAVE_DIR, "train_dataset_raw.pt")
-    torch.save(data_list, save_path)
-    print(f"数据集生成完毕！成功生成样本数: {success_count}/{NUM_SAMPLES}")
-    print(f"保存路径: {save_path}")
+def main():
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description="Multiprocess ITSN Dataset Generation")
+    parser.add_argument("--num_samples", type=int, default=DEFAULT_NUM_SAMPLES, help="Total samples to generate")
+    parser.add_argument("--num_workers", type=int, default=None, help="Number of processes (default: CPU cores)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--output_name", type=str, default="train_dataset_raw.pt", help="Output filename")
+    args = parser.parse_args()
+
+    ensure_dir(SAVE_DIR)
+    
+    # 任务切分
+    batch_size = DEFAULT_BATCH_SIZE
+    num_batches = args.num_samples // batch_size
+    if args.num_samples % batch_size != 0:
+        num_batches += 1
+        
+    tasks = []
+    for i in range(num_batches):
+        current_size = min(batch_size, args.num_samples - i * batch_size)
+        # 每个 Batch 分配一个基于全局 Seed 的偏移 Seed
+        tasks.append((i, current_size, args.seed))
+
+    print(f"=== 多进程数据集生成 ===")
+    print(f"目标样本: {args.num_samples}")
+    print(f"进程数量: {args.num_workers if args.num_workers else 'Auto'}")
+    print(f"输出路径: {os.path.join(SAVE_DIR, args.output_name)}")
+
+    all_data = []
+    
+    # 启动多进程池
+    # Windows 下必须在 if __name__ == '__main__': 保护块内执行
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+        futures = [executor.submit(generate_batch, t) for t in tasks]
+        
+        # 使用 tqdm 显示总体进度
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing Batches"):
+            try:
+                batch_data = future.result()
+                all_data.extend(batch_data)
+            except Exception as e:
+                print(f"Batch Error: {e}")
+
+    # 保存结果
+    save_path = os.path.join(SAVE_DIR, args.output_name)
+    torch.save(all_data, save_path)
+    print(f"\n完成！成功生成样本数: {len(all_data)} / {args.num_samples}")
+    print(f"保存至: {save_path}")
 
 if __name__ == "__main__":
-    generate_dataset()
+    # Windows 必须调用 freeze_support
+    multiprocessing.freeze_support()
+    main()
