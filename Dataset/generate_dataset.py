@@ -1,11 +1,20 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 import numpy as np
 import torch
-import os
 import sys
 import argparse
 import multiprocessing
 import concurrent.futures
 from tqdm import tqdm
+
+# Windows multiprocessing fix: 必须在导入其他模块前设置
+if os.name == 'nt':
+    multiprocessing.set_start_method('spawn', force=True)
 
 # 添加项目根目录到 Python 路径
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +26,7 @@ from Scenario.baseline_optimizer import BaselineZFSDROptimizer
 
 # === 默认配置 ===
 DEFAULT_NUM_SAMPLES = 5000
-DEFAULT_BATCH_SIZE = 50       # 每个子进程一次处理多少样本
+DEFAULT_BATCH_SIZE = 2        # 每个子进程一次处理多少样本
 SAVE_DIR = "dataset_ris_itsn_raw"
 NOISE_POWER_DBM = -174 + 10*np.log10(10e6)
 NOISE_POWER = 10**(NOISE_POWER_DBM/10) / 1000
@@ -30,7 +39,9 @@ def generate_batch(args):
     """
     子进程执行函数：生成一批数据
     """
-    batch_idx, batch_size, base_seed = args
+    batch_idx, batch_size, base_seed, pos = args
+    # 可选：显示进程信息
+    pid = os.getpid()
     
     # 为当前 Batch 设置唯一的随机种子
     seed = base_seed + batch_idx + np.random.randint(0, 10000)
@@ -55,6 +66,16 @@ def generate_batch(args):
     )
     
     local_data = []
+
+    # position=pos 确保每个进程占一行
+    # leave=False 避免结束后残留
+    pbar = tqdm(
+        total=batch_size,
+        desc=f"PID {pid} | Batch {batch_idx}",
+        position=pos,
+        leave=False,
+        dynamic_ncols=True
+    )
     
     # 在 Batch 内循环生成
     for _ in range(batch_size):
@@ -64,7 +85,7 @@ def generate_batch(args):
             
             # 卫星角度限制: 仰角 40~80, 方位角 -180~45
             ele = np.random.uniform(40, 80)
-            azi = np.random.uniform(-180, 45) 
+            azi = np.random.uniform(-180, 0) 
             env.update_satellite_position(ele, azi)
             
             # --- B. 生成原始信道 ---
@@ -82,16 +103,33 @@ def generate_batch(args):
             h_k_r = raw_channels['H_RIS2UE']
             h_j_r = raw_channels['H_RIS2SUE']
             G_BS = raw_channels['G_BS']
-            
-            W_sat_dummy = np.ones((1, env.SK), dtype=complex)
 
             # --- D. 运行凸优化 (获取 Label) ---
+            # Get current channels
+            channels = raw_channels
+
+            # Extract channels (using scenario's naming convention) with conjugate
+            h_k_opt = channels['H_BS2UE'].conj()      # BS -> BS users (K, N_t)
+            h_j_opt = channels['H_BS2SUE'].conj()     # BS -> SAT users (J, N_t)
+            h_s_k_opt = channels['H_SAT2UE'].conj()   # SAT -> BS users (K, N_s)
+            h_s_j_opt = channels['H_SAT2SUE'].conj()  # SAT -> SAT users (J, N_s)
+            h_k_r_opt = channels['H_RIS2UE'].conj()   # BS users -> RIS (K, N)
+            h_j_r_opt = channels['H_RIS2SUE'].conj()  # SAT users -> RIS (J, N)
+            G_BS_opt = channels['G_BS'].conj()        # RIS -> BS (N, N_t)
+            G_S_opt = channels['G_SAT'].conj()        # RIS -> SAT (N, N_s)
+            W_sat = channels['W_sat']                # Satellite beamforming
+
+            # Run baseline optimization
             w_opt_norm, Phi_opt, info = optimizer.optimize(
-                h_k, h_j, 
-                h_s_k_eff, h_s_j_eff, 
-                h_k_r, h_j_r, 
-                G_BS, G_S_eff, 
-                W_sat_dummy
+                h_k_opt,
+                h_j_opt,
+                h_s_k_opt,
+                h_s_j_opt,
+                h_k_r_opt,
+                h_j_r_opt,
+                G_BS_opt,
+                G_S_opt,  # Use true G_SAT (no ephemeris uncertainty)
+                W_sat
             )
             
             # 提取结果
@@ -120,7 +158,9 @@ def generate_batch(args):
         except Exception:
             # 忽略优化失败的样本
             continue
-            
+        finally:
+            pbar.update(1)
+    pbar.close()        
     return local_data
 
 def main():
@@ -133,9 +173,16 @@ def main():
     args = parser.parse_args()
 
     ensure_dir(SAVE_DIR)
-    
-    # 任务切分
-    batch_size = DEFAULT_BATCH_SIZE
+
+    # 确定实际进程数
+    if args.num_workers is None:
+        import multiprocessing
+        num_workers = multiprocessing.cpu_count()
+    else:
+        num_workers = args.num_workers
+
+    # 任务切分：根据 num_samples 和 num_workers 自动计算每个进程的采样数量
+    batch_size = max(1, args.num_samples // num_workers)
     num_batches = args.num_samples // batch_size
     if args.num_samples % batch_size != 0:
         num_batches += 1
@@ -143,19 +190,21 @@ def main():
     tasks = []
     for i in range(num_batches):
         current_size = min(batch_size, args.num_samples - i * batch_size)
+        pos = 1 + (i % num_workers)  # 每个worker复用固定行
         # 每个 Batch 分配一个基于全局 Seed 的偏移 Seed
-        tasks.append((i, current_size, args.seed))
+        tasks.append((i, current_size, args.seed, pos))
 
     print(f"=== 多进程数据集生成 ===")
     print(f"目标样本: {args.num_samples}")
-    print(f"进程数量: {args.num_workers if args.num_workers else 'Auto'}")
+    print(f"进程数量: {num_workers}")
+    print(f"每进程样本: {batch_size}")
     print(f"输出路径: {os.path.join(SAVE_DIR, args.output_name)}")
 
     all_data = []
     
     # 启动多进程池
     # Windows 下必须在 if __name__ == '__main__': 保护块内执行
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = [executor.submit(generate_batch, t) for t in tasks]
         
         # 使用 tqdm 显示总体进度

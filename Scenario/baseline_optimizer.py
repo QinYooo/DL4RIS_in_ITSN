@@ -16,7 +16,6 @@ import numpy as np
 import cvxpy as cp
 from typing import Tuple, Dict, Optional
 import warnings
-import mosek
 
 class BaselineZFSDROptimizer:
     """
@@ -36,7 +35,7 @@ class BaselineZFSDROptimizer:
         gamma_k: np.ndarray,  # SINR thresholds for BS users (linear, not dB)
         gamma_j: float,  # SINR threshold for satellite users (linear)
         P_b: float = 0.001,  # BS power scaling factor
-        P_s_init: float = 1.0,  # Initial satellite power scaling
+        P_s_init: float = 15,  # Initial satellite power scaling
         ris_amplitude_gain: float = 9.0,  # RIS amplitude gain
         N_iter: int = 20,  # Maximum iterations
         convergence_tol: float = 1e-2,  # Convergence tolerance for power
@@ -336,7 +335,7 @@ class BaselineZFSDROptimizer:
             p[k] = max(self.gamma_k[k, 0] * (interference + self.sigma2) / signal_power, 0)
 
         # Check total power constraint
-        total_power = np.linalg.norm(np.sqrt(p).reshape(-1, 1) * w.T, 'fro') ** 2
+        total_power = self.P_b * np.linalg.norm(np.sqrt(p).reshape(-1, 1) * w.T, 'fro') ** 2
 
         if self.verbose:
             print(f"  [Power Allocation] Total power: {total_power:.4f} W (Max: {self.P_max:.4f} W)")
@@ -777,12 +776,21 @@ class BaselineZFSDROptimizer:
 
         mosek_params = {
             # 收紧可行性容差，迫使求解器更精确
-            mosek.dparam.intpnt_co_tol_pfeas: 1.0e-8,
-            mosek.dparam.intpnt_co_tol_dfeas: 1.0e-8,
-            mosek.dparam.intpnt_co_tol_rel_gap: 1.0e-8,
-            mosek.dparam.intpnt_co_tol_infeas: 1.0e-8,
-            # 强制使用对偶形式 (通常对 SDP 更快且更稳)
-            mosek.iparam.intpnt_solve_form: mosek.solveform.dual,
+            # mosek.dparam.intpnt_co_tol_pfeas: 1.0e-8,
+            # mosek.dparam.intpnt_co_tol_dfeas: 1.0e-8,
+            # mosek.dparam.intpnt_co_tol_rel_gap: 1.0e-8,
+            # mosek.dparam.intpnt_co_tol_infeas: 1.0e-8,
+            # # 强制使用对偶形式 (通常对 SDP 更快且更稳)
+            # mosek.iparam.intpnt_solve_form: mosek.solveform.dual,
+            "MSK_DPAR_INTPNT_CO_TOL_PFEAS": 1.0e-8,
+            "MSK_DPAR_INTPNT_CO_TOL_DFEAS": 1.0e-8,
+            "MSK_DPAR_INTPNT_CO_TOL_REL_GAP": 1.0e-8,
+            "MSK_DPAR_INTPNT_CO_TOL_INFEAS": 1.0e-8,
+            # 注意：新版本 MOSEK 中 INPNT_SOLVE_FORM 参数已被移除或更名
+            # 删除此参数以避免错误
+            # "MSK_IPAR_INPNT_SOLVE_FORM": mosek.solveform.dual,
+            "MSK_IPAR_NUM_THREADS": 10,
+            "MSK_IPAR_LOG": 0,
             # 如果数值问题依然存在，允许 aggressive scaling
             # mosek.iparam.intpnt_scaling: mosek.scaling.aggressive,
         }
@@ -818,31 +826,7 @@ class BaselineZFSDROptimizer:
             if self.verbose:
                 print(f"[SDR] MOSEK failed: {e}")
             return None, None, None, f"failed: {e}"
-    def _optimize_ris_simple(
-        self, h_k, h_j, h_s_k, h_s_j, h_k_r, h_j_r, G_BS, G_S
-    ) -> np.ndarray:
-        """
-        Optimize RIS phase using simple random search method.
-        Much faster than SDR but may be suboptimal.
-        """
-        if self.verbose:
-            print("\n[Simple RIS] Optimizing RIS phase using random search...")
-
-        phi = self.simple_ris_opt.optimize_random_search(
-            h_k_r, h_j_r, G_BS, G_S,
-            self.w, self.W_sat,
-            h_k, h_j, h_s_k, h_s_j,
-            self.P_b, self.P_s, self.sigma2,
-            ris_gain=self.ris_gain
-        )
-
-        Phi_new = self.ris_gain * np.diag(phi)
-
-        if self.verbose:
-            print(f"  [Simple RIS] Optimization completed")
-
-        return Phi_new
-
+    
     def _gaussian_randomization(self, V, Ra, Rb, Rc, Rd, a, b, c, d, L=5000):
         """
         Gaussian randomization to recover phase from SDR solution.
@@ -1047,9 +1031,9 @@ class BaselineZFSDROptimizer:
             # Update satellite power: P_s = gamma_j * interference / signal
             # Add upper bound to prevent explosion
             P_s_required = self.gamma_j * interference_power / signal_power
-            self.P_s = min(P_s_required, self.P_sat_max / self.N_s)  # Cap at max power per antenna
+            self.P_s = min(P_s_required, self.P_sat_max)  # Cap at max power
 
-            if self.verbose and P_s_required > self.P_sat_max / self.N_s:
+            if self.verbose and P_s_required > self.P_sat_max:
                 print(f"  [Warning] Satellite power capped at {self.P_s:.4f} (required: {P_s_required:.4f})")
 
     def _print_sinr(self, H_eff_k, H_eff_j, H_sat_eff_k, H_sat_eff_j, w):
@@ -1067,7 +1051,7 @@ class BaselineZFSDROptimizer:
             signal = self.P_b * np.abs(H_eff_k[k].conj() @ w[:, k]) ** 2
             SINR_dB = 10 * np.log10(signal / interference + self.sigma2)
             all_sinr.append(signal / interference + self.sigma2)
-            # print(f"  BS UE({k+1}) SINR: {SINR_dB:.2f} dB")
+            print(f"  BS UE({k+1}) SINR: {SINR_dB:.2f} dB")
 
         # Satellite users
         for j in range(self.J):

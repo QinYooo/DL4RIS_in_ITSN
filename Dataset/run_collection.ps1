@@ -7,7 +7,7 @@ $NUM_SAMPLES = 10000
 
 # Number of parallel workers (Recommended: CPU Cores - 2)
 # Set to $null to use all available cores
-$NUM_WORKERS = 48 
+$NUM_WORKERS = 50 
 
 # Random Seed (Change this for test set, e.g., 2024)
 $SEED = 42
