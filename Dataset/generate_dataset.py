@@ -1,11 +1,11 @@
 import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+# os.environ["OMP_NUM_THREADS"] = "1"
+# os.environ["MKL_NUM_THREADS"] = "1"
+# os.environ["OPENBLAS_NUM_THREADS"] = "1"
+# os.environ["NUMEXPR_NUM_THREADS"] = "1"
+# os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 import numpy as np
-import torch
+from torch import save
 import sys
 import argparse
 import multiprocessing
@@ -202,22 +202,16 @@ def main():
 
     all_data = []
     
-    # 启动多进程池
-    # Windows 下必须在 if __name__ == '__main__': 保护块内执行
-    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(generate_batch, t) for t in tasks]
-        
-        # 使用 tqdm 显示总体进度
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing Batches"):
-            try:
-                batch_data = future.result()
-                all_data.extend(batch_data)
-            except Exception as e:
-                print(f"Batch Error: {e}")
+    from concurrent.futures import ProcessPoolExecutor
+    from tqdm import tqdm
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        for batch_data in tqdm(executor.map(generate_batch, tasks),
+                           total=len(tasks), desc="Processing Batches"):
+            all_data.extend(batch_data)
 
     # 保存结果
     save_path = os.path.join(SAVE_DIR, args.output_name)
-    torch.save(all_data, save_path)
+    save(all_data, save_path)
     print(f"\n完成！成功生成样本数: {len(all_data)} / {args.num_samples}")
     print(f"保存至: {save_path}")
 

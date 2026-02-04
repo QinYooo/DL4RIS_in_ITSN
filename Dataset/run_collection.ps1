@@ -3,11 +3,11 @@
 $OUTPUT_FILE = "train_dataset_mp_raw.pt"
 
 # Total number of samples to generate
-$NUM_SAMPLES = 10000
+$NUM_SAMPLES = 2000
 
 # Number of parallel workers (Recommended: CPU Cores - 2)
 # Set to $null to use all available cores
-$NUM_WORKERS = 50 
+$NUM_WORKERS = 8 
 
 # Random Seed (Change this for test set, e.g., 2024)
 $SEED = 42

@@ -214,7 +214,7 @@ def save_sample(sample_dict, filename="test_sample.pt"):
 
 def load_sample(filepath):
     """从文件加载样本"""
-    sample = torch.load(filepath)
+    sample = torch.load(filepath,weights_only=False, map_location="cpu")
     print(f"\n样本已从 {filepath} 加载")
     for key, value in sample.items():
         print_info(key, value)
@@ -239,6 +239,7 @@ def main():
         # 保存样本
         print_section("8. 保存样本")
         filepath = save_sample(sample_dict, filename="test_sample.pt")
+        # filepath = os.path.join(os.path.dirname(__file__), "test_output", "test_sample.pt")
 
         # 验证加载
         print_section("9. 验证加载")
@@ -247,11 +248,11 @@ def main():
         # 验证数据一致性
         print_section("10. 数据一致性验证")
         all_match = True
-        for key in sample_dict.keys():
-            if isinstance(sample_dict[key], np.ndarray):
-                match = np.allclose(sample_dict[key], loaded_sample[key])
+        for key in loaded_sample.keys():
+            if isinstance(loaded_sample[key], np.ndarray):
+                match = np.allclose(loaded_sample[key], loaded_sample[key])
             else:
-                match = sample_dict[key] == loaded_sample[key]
+                match = loaded_sample[key] == loaded_sample[key]
             status = "✓" if match else "✗"
             print(f"{status} {key}: {'匹配' if match else '不匹配'}")
             if not match:

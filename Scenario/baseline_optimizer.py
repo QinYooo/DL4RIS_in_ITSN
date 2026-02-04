@@ -186,7 +186,8 @@ class BaselineZFSDROptimizer:
             'final_P_sum': self.P_sum,
             'all_sinr': self.all_sinr
         }
-        print(f"P_bs: {self.P_bs}, P_sat: {self.P_sat}, P_sum: {self.P_sum}")
+        if self.verbose:
+            print(f"P_bs: {self.P_bs}, P_sat: {self.P_sat}, P_sum: {self.P_sum}")
         return self.w, self.Phi, info
 
         
@@ -789,7 +790,7 @@ class BaselineZFSDROptimizer:
             # 注意：新版本 MOSEK 中 INPNT_SOLVE_FORM 参数已被移除或更名
             # 删除此参数以避免错误
             # "MSK_IPAR_INPNT_SOLVE_FORM": mosek.solveform.dual,
-            "MSK_IPAR_NUM_THREADS": 10,
+            # "MSK_IPAR_NUM_THREADS": 10,
             "MSK_IPAR_LOG": 0,
             # 如果数值问题依然存在，允许 aggressive scaling
             # mosek.iparam.intpnt_scaling: mosek.scaling.aggressive,
@@ -827,7 +828,7 @@ class BaselineZFSDROptimizer:
                 print(f"[SDR] MOSEK failed: {e}")
             return None, None, None, f"failed: {e}"
     
-    def _gaussian_randomization(self, V, Ra, Rb, Rc, Rd, a, b, c, d, L=5000):
+    def _gaussian_randomization(self, V, Ra, Rb, Rc, Rd, a, b, c, d, L=1000):
         """
         Gaussian randomization to recover phase from SDR solution.
         Fixed for numerical stability (negative eigenvalues).
@@ -1051,7 +1052,7 @@ class BaselineZFSDROptimizer:
             signal = self.P_b * np.abs(H_eff_k[k].conj() @ w[:, k]) ** 2
             SINR_dB = 10 * np.log10(signal / interference + self.sigma2)
             all_sinr.append(signal / interference + self.sigma2)
-            print(f"  BS UE({k+1}) SINR: {SINR_dB:.2f} dB")
+            # print(f"  BS UE({k+1}) SINR: {SINR_dB:.2f} dB")
 
         # Satellite users
         for j in range(self.J):
@@ -1062,7 +1063,7 @@ class BaselineZFSDROptimizer:
             signal = self.P_s * np.abs(H_sat_eff_j[j].conj() @ self.W_sat[:, j]) ** 2
             SINR_dB = 10 * np.log10(signal / interference + self.sigma2)
             all_sinr.append(signal / interference + self.sigma2)
-            print(f"  SAT UE({j+1}) SINR: {SINR_dB:.2f} dB")
+            # print(f"  SAT UE({j+1}) SINR: {SINR_dB:.2f} dB")
         return all_sinr
 
     def _print_detailed_sinr(self, H_eff_k, H_eff_j, H_sat_eff_k, H_sat_eff_j, p, gamma_k_iter, gamma_j_iter):
