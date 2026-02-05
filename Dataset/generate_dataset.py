@@ -24,6 +24,111 @@ if project_root not in sys.path:
 from Scenario.scenario import ITSNScenario
 from Scenario.baseline_optimizer import BaselineZFSDROptimizer
 
+# === 归一化配置 ===
+ENABLE_NORMALIZATION = True  # 是否启用信道归一化
+
+def compute_channel_statistics(all_data):
+    """
+    计算信道统计信息（均值、标准差）用于归一化
+    返回各信道的统计字典，格式：
+    {
+        'hk': {'mean': ..., 'std': ...},
+        'hrk': {'mean': ..., 'std': ...},
+        'GB': {'mean': ..., 'std': ...},
+        'hs': {'mean': ..., 'std': ...},
+        'GSAT': {'mean': ..., 'std': ...}
+        'norm_params_saved': True  # 标记已保存
+    }
+    """
+    if not ENABLE_NORMALIZATION:
+        return None
+
+    stats = {}
+
+    # 收集所有复数信道的幅度信息
+    hk_abs_list = []
+    hrk_abs_list = []
+    GB_abs_list = []
+    hs_abs_list = []
+    GSAT_abs_list = []
+
+    for sample in all_data:
+        hk_abs_list.append(np.abs(sample['hk']))
+        hrk_abs_list.append(np.abs(sample['hrk']))
+        GB_abs_list.append(np.abs(sample['GB']))
+        hs_abs_list.append(np.abs(sample['hs']))
+        GSAT_abs_list.append(np.abs(sample['GSAT']))
+
+    # 计算统计信息
+    if len(hk_abs_list) > 0:
+        hk_abs = np.concatenate(hk_abs_list)
+        stats['hk'] = {
+            'mean': np.mean(hk_abs),
+            'std': np.std(hk_abs)
+        }
+    if len(hrk_abs_list) > 0:
+        hrk_abs = np.concatenate(hrk_abs_list)
+        stats['hrk'] = {
+            'mean': np.mean(hrk_abs),
+            'std': np.std(hrk_abs)
+        }
+    if len(GB_abs_list) > 0:
+        GB_abs = np.concatenate(GB_abs_list)
+        stats['GB'] = {
+            'mean': np.mean(GB_abs),
+            'std': np.std(GB_abs)
+        }
+    if len(hs_abs_list) > 0:
+        hs_abs = np.concatenate(hs_abs_list)
+        stats['hs'] = {
+            'mean': np.mean(hs_abs),
+            'std': np.std(hs_abs)
+        }
+    if len(GSAT_abs_list) > 0:
+        GSAT_abs = np.concatenate(GSAT_abs_list)
+        stats['GSAT'] = {
+            'mean': np.mean(GSAT_abs),
+            'std': np.std(GSAT_abs)
+        }
+
+    stats['norm_params_saved'] = True
+    return stats
+
+def save_normalization_stats(stats, save_dir, filename='normalization_stats.npz'):
+    """
+    保存归一化参数到文件
+    """
+    save_path = os.path.join(save_dir, filename)
+    np.savez(save_path, **stats)
+    print(f"归一化参数已保存至: {save_path}")
+    return save_path
+
+def normalize_channels(sample_dict, stats):
+    """
+    对样本中的信道进行归一化
+    """
+    if stats is None:
+        return sample_dict
+
+    # 复制字典，避免修改原始数据
+    normalized = sample_dict.copy()
+
+    # 对每个信道进行归一化 (仅复数信道)
+    # 归一化公式: (x - mean) / std
+    # 实部虚部分别归一化，然后组合回复数
+    for key in ['hk', 'hrk', 'GB', 'hs', 'GSAT']:
+        if key in sample_dict and key in stats:
+            mean_val = stats[key]['mean']
+            std_val = stats[key]['std']
+
+            # 实部和虚部分别归一化
+            real_part = (np.real(normalized[key]) - mean_val) / (std_val + 1e-8)
+            imag_part = (np.imag(normalized[key]) - mean_val) / (std_val + 1e-8)
+            normalized[key] = real_part + 1j * imag_part
+
+    return normalized
+
+
 # === 默认配置 ===
 DEFAULT_NUM_SAMPLES = 5000
 DEFAULT_BATCH_SIZE = 2        # 每个子进程一次处理多少样本

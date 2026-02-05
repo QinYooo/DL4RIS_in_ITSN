@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class ZF_Power_Allocator:
-    def __init__(self, K_UE, K_SUE, Nt, N_ris, gamma_ue_db=10, gamma_su_db=10, sigma2_dbm=-80):
+    def __init__(self, K_UE, K_SUE, Nt, N_ris, gamma_ue_db=13, gamma_su_db=13, sigma2_dbm=-80):
         self.K = K_UE
         self.K_SUE = K_SUE # 通常为1
         self.Nt = Nt
@@ -11,7 +11,7 @@ class ZF_Power_Allocator:
         # 将 dB/dBm 转换为线性值
         self.gamma_ue = 10**(gamma_ue_db / 10.0)
         self.gamma_su = 10**(gamma_su_db / 10.0)
-        self.sigma2 = 10**(sigma2_dbm / 10.0) / 1000.0 # dBm -> Watts
+        self.sigma2 = 1e12 * 10**(sigma2_dbm / 10.0) / 1000.0 # dBm -> Watts
         
         # 保护带/容差，防止浮点误差导致的微小上升误判
         self.epsilon = 1e-6
@@ -28,7 +28,7 @@ class ZF_Power_Allocator:
         # 欧拉公式: e^(j*theta)
         phi_real = torch.cos(theta)
         phi_imag = torch.sin(theta)
-        phi = torch.complex(phi_real, phi_imag).unsqueeze(1) # (B, 1, N_ris)
+        phi = 9*torch.complex(phi_real, phi_imag).unsqueeze(1) # (B, 1, N_ris)
 
         # 2. 解析原始信道 (构建 Complex Tensor)
         # -------------------------------------------------
@@ -59,8 +59,8 @@ class ZF_Power_Allocator:
         hrk_ue = hrk[:, :self.K, :]     # (B, K, N_ris)
         hrk_su = hrk[:, self.K:, :]     # (B, 1, N_ris)
         
-        hs_ue = hs_ue[:, :self.K, :]    # (B, K, 1)
         hs_su = hs_ue[:, self.K:, :]    # (B, 1, 1) (即 Sat -> SU 直连)
+        hs_ue = hs_ue[:, :self.K, :]    # (B, K, 1)
         
         # -------------------------------------------------
         # 3. 计算级联等效信道
@@ -90,7 +90,7 @@ class ZF_Power_Allocator:
         
         return H_bs_ue_eff, H_bs_su_eff, H_sat_ue_eff, H_sat_su_eff
 
-    def solve(self, theta, x_input, Psat_init_dbm=30):
+    def solve(self, theta, x_input, Psat_init = 15.0):
         """
         主求解函数
         theta: 网络输出的相位 (B, N_ris)
@@ -119,7 +119,7 @@ class ZF_Power_Allocator:
         V = W_beams / (W_norms + 1e-12) # V 是方向向量 (B, Nt, K)
         
         # 3. 迭代功率分配
-        Psat_current = torch.ones(B, 1, 1).to(theta.device) * (10**(Psat_init_dbm/10)/1000)
+        Psat_current = torch.ones(B, 1, 1).to(theta.device) * Psat_init # initial Psat: 15 w
         
         # 存储最终结果
         final_W = torch.zeros_like(W_beams)
