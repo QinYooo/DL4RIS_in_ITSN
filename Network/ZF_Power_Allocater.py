@@ -28,7 +28,7 @@ class ZF_Power_Allocator:
         # 欧拉公式: e^(j*theta)
         phi_real = torch.cos(theta)
         phi_imag = torch.sin(theta)
-        phi = 9*torch.complex(phi_real, phi_imag).unsqueeze(1) # (B, 1, N_ris)
+        phi = 9 * torch.complex(phi_real, phi_imag).unsqueeze(1) # (B, 1, N_ris)
 
         # 2. 解析原始信道 (构建 Complex Tensor)
         # -------------------------------------------------
@@ -69,11 +69,11 @@ class ZF_Power_Allocator:
         # A. BS -> UE 等效信道 (用于 ZF 计算)
         # Term2: hrk (B,K,N) * diag(phi) * GB (B,N,Nt)
         # 也就是 hrk * phi (广播) -> (B,K,N) @ GB -> (B,K,Nt)
-        ris_link_ue = (hrk_ue * phi) @ GB
+        ris_link_ue = torch.bmm((hrk_ue * phi), GB)
         H_bs_ue_eff = hk_ue + ris_link_ue # (B, K, Nt)
         
         # B. BS -> SU 等效信道 (用于 ZF 零陷)
-        ris_link_su_bs = (hrk_su * phi) @ GB
+        ris_link_su_bs = torch.bmm((hrk_su * phi) , GB)
         H_bs_su_eff = hk_su + ris_link_su_bs # (B, 1, Nt)
         
         # C. Sat -> UE 等效信道 (用于计算 Sat 对 UE 的干扰)
@@ -81,11 +81,11 @@ class ZF_Power_Allocator:
         # GSAT (B, N, 1). Transpose for multiplication? 
         # Path: UE <--- RIS <--- Sat
         # h = h_s_ue + h_r_ue * phi * G_sat
-        ris_link_sat_ue = (hrk_ue * phi) @ GSAT # (B, K, 1)
+        ris_link_sat_ue = torch.bmm((hrk_ue * phi) , GSAT) # (B, K, 1)
         H_sat_ue_eff = hs_ue + ris_link_sat_ue
         
         # D. Sat -> SU 等效信道 (用于计算 SU 的接收信号)
-        ris_link_sat_su = (hrk_su * phi) @ GSAT
+        ris_link_sat_su = torch.bmm((hrk_su * phi) , GSAT)
         H_sat_su_eff = hs_su + ris_link_sat_su
         
         return H_bs_ue_eff, H_bs_su_eff, H_sat_ue_eff, H_sat_su_eff

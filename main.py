@@ -12,7 +12,7 @@ CONFIG = {
     'Rows': 10, 'Cols': 10,
     'Batch_Size': 64,
     'Stage1_Epochs': 100,
-    'Stage2_Epochs': 100,
+    'Stage2_Epochs': 400,
     'LR': 1e-3,
     'Log_Dir': './runs/semi_supervised'  # TensorBoard 日志目录
 }
@@ -147,7 +147,8 @@ unlabeled_eval_loader = torch.utils.data.DataLoader(
 # ==========================================
 # 3. 初始化模型
 # ==========================================
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cpu"
 print(f"\nDevice: {device}")
 
 # 实例化 CNN
@@ -155,8 +156,15 @@ cnn_net = RisCnnNet(K_UE=CONFIG['K_UE'], K_SUE=CONFIG['K_SUE'], Nt=CONFIG['Nt'],
                     N_ris_rows=CONFIG['Rows'], N_ris_cols=CONFIG['Cols'])
 
 # 实例化 ZF Solver (物理层)
+Bw = 10e6
+k_boltz = 1.38064852e-23
+T0 = 290
+F_dB = 3
+P_noise = k_boltz * T0 * Bw * (10**(F_dB/10))
+from numpy import log10
+sigma2_dbm = 10 * log10(torch.tensor(P_noise)) + 30  # 转为 dBm
 zf_solver = ZF_Power_Allocator(K_UE=CONFIG['K_UE'], K_SUE=CONFIG['K_SUE'],
-                               Nt=CONFIG['Nt'], N_ris=N_ris)
+                               Nt=CONFIG['Nt'], N_ris=N_ris, sigma2_dbm= sigma2_dbm.item())
 
 # 组合
 model = IntegratedRISModel(cnn_net, zf_solver).to(device)
